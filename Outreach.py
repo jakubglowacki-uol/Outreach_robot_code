@@ -17,8 +17,8 @@ def main():
 	# ✏️ EDIT BELOW: choose what to add.
 	# Keep the order: indicator -> acid -> base. Change the amounts if you like.
 	# For safety, only adjust the numbers on the next two lines.
-	acid_ml = 0.25   # Try values like 0.25, 0.5, 1.0 (units: mL)
-	base_ml = 4.5    # Try values like 1.0, 2.0, 4.5 (units: mL)
+	acid_ml = 1   # Try values like 0.25, 0.5, 1.0 (units: mL)
+	base_ml = 1    # Try values like 1.0, 2.0, 4.5 (units: mL)
 
 	# Add a few drops of indicator.
 	demo.add_indicator()
