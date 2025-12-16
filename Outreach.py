@@ -22,10 +22,11 @@ def main():
 
 	# Add a few drops of indicator.
 	demo.add_indicator()
-	# Add acid (mL you set above).
-	demo.add_acid(acid_ml)
 	# Add base (mL you set above).
 	demo.add_base(base_ml)
+	# Add acid (mL you set above).
+	demo.add_acid(acid_ml)
+	
 	# ---------------------------------------------------------------------
 
 
