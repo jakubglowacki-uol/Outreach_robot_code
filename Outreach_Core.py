@@ -2,15 +2,37 @@ import os
 import sys
 import time
 import math
-import serial.tools.list_ports
+import threading
+try:
+    import serial.tools.list_ports
+    HAS_SERIAL = True
+except ImportError:
+    HAS_SERIAL = False
 
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 
-from utils.UR_Functions import URfunctions as URControl
-from robotiq.robotiq_gripper import RobotiqGripper
-from PyLabware.devices.ika_rct_digital import RCTDigitalHotplate
+try:
+    from utils.UR_Functions import URfunctions as URControl
+    HAS_UR = True
+except ImportError:
+    HAS_UR = False
+    URControl = None
+
+try:
+    from robotiq.robotiq_gripper import RobotiqGripper
+    HAS_GRIPPER = True
+except ImportError:
+    HAS_GRIPPER = False
+    RobotiqGripper = None
+
+try:
+    from PyLabware.devices.ika_rct_digital import RCTDigitalHotplate
+    HAS_HOTPLATE = True
+except ImportError:
+    HAS_HOTPLATE = False
+    RCTDigitalHotplate = None
 
  
  
@@ -74,6 +96,10 @@ def find_hotplate_port():
     Detects and returns the serial port of an IKA RCT hotplate.
     Tries all ports until one responds successfully.
     """
+    if not HAS_SERIAL or not HAS_HOTPLATE:
+        print("Warning: serial or hotplate driver not available. Skipping lookup.")
+        return None, None
+        
     ports = serial.tools.list_ports.comports()
     plate = None
 
@@ -141,21 +167,46 @@ class OutreachDemo:
         demo.dispose()  # optional; also called automatically
     """
 
-    def __init__(self, robot_ip="192.168.0.2", robot_port=30003, gripper_port=63352):
+    def __init__(
+        self,
+        robot_ip="192.168.0.2",
+        robot_port=30003,
+        gripper_port=63352,
+        simulation=False,
+    ):
         self.robot_ip = robot_ip
         self.robot_port = robot_port
         self.gripper_port = gripper_port
+        self.simulation_mode = bool(simulation)
         self.robot = None
         self.gripper = None
         self.plate = None
+        self._initialized = False
+        self._busy_lock = threading.Lock()
+        self._is_busy = False
+
+    @property
+    def is_busy(self):
+        return self._is_busy
 
     # --- Lifecycle ---
     def initialize(self):
         """Connect robot, gripper, hotplate; move home and start stirring."""
+        if self.simulation_mode:
+            self._initialized = True
+            print("[SIMULATION] Initialization complete (no hardware connections attempted).")
+            return
+
+        # Check for missing hardware dependencies if not in simulation mode
+        if not HAS_UR:
+            raise ImportError("URControl dependency (ur-rtde) is missing. Switch to simulation mode or install dependencies.")
+        if not HAS_GRIPPER:
+            print("Warning: RobotiqGripper dependency missing. Gripper movements will fail.")
+        
         if self.robot is None:
             self.robot = URControl(ip=self.robot_ip, port=self.robot_port)
 
-        if self.gripper is None:
+        if self.gripper is None and HAS_GRIPPER:
             self.gripper = RobotiqGripper()
             self.gripper.connect(self.robot_ip, self.gripper_port)
 
@@ -175,12 +226,20 @@ class OutreachDemo:
             time.sleep(1)
             print(f"Speed: {self.plate.get_speed()} rpm")
 
+        self._initialized = True
+
     def dispose(self):
         """Safely stop stirring/cleanup. Called automatically on destruction."""
+        if self.simulation_mode:
+            self._initialized = False
+            print("[SIMULATION] Dispose complete (no hardware cleanup required).")
+            return
+
         try:
             if self.plate:
                 self.plate.stop_stirring()
                 print("Stirring stopped.")
+            self._initialized = False
         except Exception as exc:
             print(f"Warning: failed to stop plate cleanly: {exc}")
 
@@ -193,34 +252,98 @@ class OutreachDemo:
 
     # --- Public student-facing methods ---
     def add_indicator(self):
+        self._run_exclusive(
+            self._add_indicator_impl,
+            "Robot is currently busy. Wait for the current action to finish.",
+        )
+
+    def add_acid(self, amount_ml):
+        self._run_exclusive(
+            lambda: self._add_acid_impl(amount_ml),
+            "Robot is currently busy. Wait for the current action to finish.",
+        )
+
+    def add_base(self, amount_ml):
+        self._run_exclusive(
+            lambda: self._add_base_impl(amount_ml),
+            "Robot is currently busy. Wait for the current action to finish.",
+        )
+
+    def _add_indicator_impl(self):
         self._ensure_ready()
         print("Adding a dew drops of indicator to the hotplate sample vial.", "\n")
         self._pipetting_routine(input_vial=3, which_pipette=3, amount_ml=0.15)
 
-    def add_acid(self, amount_ml):
+    def _add_acid_impl(self, amount_ml):
+        amount = self._validate_volume_ml(amount_ml, reagent_name="acid")
         self._ensure_ready()
-        print(f"Adding {amount_ml} ml of acid to the hotplate sample vial.", "\n")
-        self._pipetting_routine(input_vial=1, which_pipette=1, amount_ml=amount_ml)
+        print(f"Adding {amount} ml of acid to the hotplate sample vial.", "\n")
+        self._pipetting_routine(input_vial=1, which_pipette=1, amount_ml=amount)
 
-    def add_base(self, amount_ml):
+    def _add_base_impl(self, amount_ml):
+        amount = self._validate_volume_ml(amount_ml, reagent_name="base")
         self._ensure_ready()
-        print(f"Adding {amount_ml} ml of base to the hotplate sample vial.", "\n")
-        self._pipetting_routine(input_vial=2, which_pipette=2, amount_ml=amount_ml)
+        print(f"Adding {amount} ml of base to the hotplate sample vial.", "\n")
+        self._pipetting_routine(input_vial=2, which_pipette=2, amount_ml=amount)
 
     # --- Internal helpers (kept private-ish) ---
     def _ensure_ready(self):
+        if not self._initialized:
+            raise RuntimeError("Call initialize() before performing operations.")
+        if self.simulation_mode:
+            return
         if not (self.robot and self.gripper):
             raise RuntimeError("Call initialize() before performing operations.")
 
-    def _move_robot(self, position):
+    def _run_exclusive(self, action, busy_message):
+        with self._busy_lock:
+            if self._is_busy:
+                raise RuntimeError(busy_message)
+            self._is_busy = True
+
+        try:
+            action()
+        finally:
+            with self._busy_lock:
+                self._is_busy = False
+
+    def _validate_volume_ml(self, amount_ml, reagent_name):
+        try:
+            amount = float(amount_ml)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid {reagent_name} volume: enter a number in mL.")
+
+        if amount <= 0:
+            raise ValueError(f"Invalid {reagent_name} volume: value must be > 0 mL.")
+
+        # Classroom-safe guardrail for accidental large inputs.
+        if amount > 10:
+            raise ValueError(
+                f"Invalid {reagent_name} volume: value must be <= 10 mL for this demo."
+            )
+
+        return amount
+
+    def _move_robot(self, position, speed=None, acceleration=None, blending=None):
+        if self.simulation_mode:
+            print(f"[SIMULATION] Move robot to position: {position}")
+            return
+
+        speed = MOVEMENT_PARAMS["speed"] if speed is None else speed
+        acceleration = MOVEMENT_PARAMS["acceleration"] if acceleration is None else acceleration
+        blending = MOVEMENT_PARAMS["blending"] if blending is None else blending
+
         self.robot.move_joint_list(
             position,
-            MOVEMENT_PARAMS["speed"],
-            MOVEMENT_PARAMS["acceleration"],
-            MOVEMENT_PARAMS["blending"],
+            speed,
+            acceleration,
+            blending,
         )
 
     def _operate_gripper(self, position):
+        if self.simulation_mode:
+            print(f"[SIMULATION] Move gripper to position: {position}")
+            return
         self.gripper.move(position, 125, 125)
 
     def _pipetting_routine(self, input_vial, which_pipette, amount_ml):
@@ -281,7 +404,7 @@ class OutreachDemo:
             self._move_robot(ROBOT_POSITIONS[Just_In_SVH])
             print(f"Just inside Sample Vial Holder Position {input_vial}", "\n")
             time.sleep(1)
-            self.gripper.move(240, 5, 125)
+            self._operate_gripper(240)
             time.sleep(1)
             self._move_robot(ROBOT_POSITIONS[In_SVH])
             for position in range(235, 199, -5):
@@ -356,11 +479,11 @@ class OutreachDemo:
         print(f"Above Pipette Holder Position {which_pipette}", "\n")
         time.sleep(1)
 
-        self.robot.move_joint_list(
+        self._move_robot(
             ROBOT_POSITIONS[Pipette_Holder],
-            0.05,
-            MOVEMENT_PARAMS["acceleration"],
-            MOVEMENT_PARAMS["blending"],
+            speed=0.05,
+            acceleration=MOVEMENT_PARAMS["acceleration"],
+            blending=MOVEMENT_PARAMS["blending"],
         )
         print(f"Replaced Pipette {which_pipette}", "\n")
         time.sleep(1)

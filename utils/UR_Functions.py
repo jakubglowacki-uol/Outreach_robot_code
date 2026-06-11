@@ -11,11 +11,17 @@ sys.path.append(os.path.join(current_dir, 'utils'))
 import utils.util
 # from utils.robotiq_gripper_control import RobotiqGripper
 # from utils import rtde 
-from rtde_io import RTDEIOInterface
+try:
+    from rtde_io import RTDEIOInterface
+    HAS_RTDE = True
+except ImportError:
+    HAS_RTDE = False
+    RTDEIOInterface = None
 
 # Add the directory containing robotiq_preamble.py to the Python search path
 current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(current_dir, 'robotiq'))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(os.path.join(parent_dir, 'robotiq'))
 
 class URfunctions:
     def __init__(self, ip="192.168.0.2", port=30003):
@@ -26,7 +32,11 @@ class URfunctions:
         # self.rtde_c = RTDEControlInterface("192.168.56.6")
         # self.rtde_c = RTDEControlInterface(ip)
         # print('Connected to rtde_c')
-        self.rtde_io = RTDEIOInterface(ip)
+        if HAS_RTDE and RTDEIOInterface:
+            self.rtde_io = RTDEIOInterface(ip)
+        else:
+            self.rtde_io = None
+            print("Warning: RTDEIOInterface not initialized (dependency missing)")
 
         # self.gripper = RobotiqGripper(self.rtde_c)
         # print('Connected to RobotiqGripper')
@@ -258,9 +268,12 @@ class URfunctions:
         :param signal_level: The level to set the digital output to (True for high, False for low).
         """
         # tested ref: https://sdurobotics.gitlab.io/ur_rtde/examples/examples.html#io-example
-        success = self.rtde_io.setToolDigitalOut(output_id, signal_level)
-        if not success:
-            print(f"Failed to set tool digital output {output_id} to {signal_level}")
+        if self.rtde_io:
+            success = self.rtde_io.setToolDigitalOut(output_id, signal_level)
+            if not success:
+                print(f"Failed to set tool digital output {output_id} to {signal_level}")
+        else:
+            print(f"[MOCK] Set tool digital out {output_id} to {signal_level}")
 
     def set_digital_output(self, output_id, signal_level):
         """
@@ -270,11 +283,14 @@ class URfunctions:
         :param signal_level: The level to set the digital output to (True for high, False for low).
         """
         # tested ref: https://sdurobotics.gitlab.io/ur_rtde/examples/examples.html#io-example
-        self.reconnect_socket()
-        success = self.rtde_io.setStandardDigitalOut(output_id, signal_level)
-        if not success:
-            print(f"Failed to set digital output {output_id} to {signal_level}")
-        self.close_connection()
+        if self.rtde_io:
+            self.reconnect_socket()
+            success = self.rtde_io.setStandardDigitalOut(output_id, signal_level)
+            if not success:
+                print(f"Failed to set digital output {output_id} to {signal_level}")
+            self.close_connection()
+        else:
+            print(f"[MOCK] Set digital output {output_id} to {signal_level}")
 
     def get_state(self):
         self.reconnect_socket()
