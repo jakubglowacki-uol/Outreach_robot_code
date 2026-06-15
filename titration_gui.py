@@ -79,6 +79,7 @@ class TitrationApp(tk.Tk):
         self.cap = None
         self.camera_indices = []
         self.camera_running = False
+        self.roi_center = None  # (x, y) coordinates for pH metering
 
         self.simulation_var = tk.BooleanVar(value=True)
         self.camera_var = tk.StringVar(value="0")
@@ -186,6 +187,7 @@ class TitrationApp(tk.Tk):
 
         self.video_label = ttk.Label(cam_frame, text="Camera preview will appear here.", anchor=tk.CENTER)
         self.video_label.pack(fill=tk.BOTH, expand=True, pady=10)
+        self.video_label.bind("<Button-1>", self._on_camera_click)
 
         ph_row = ttk.Frame(cam_frame)
         ph_row.pack(fill=tk.X)
@@ -436,6 +438,13 @@ class TitrationApp(tk.Tk):
             self.ph_label.configure(text=f"Approximate pH: {ph_label}")
             self.confidence_label.configure(text=f"Confidence: {confidence}")
 
+            # Draw ROI rectangle for visual feedback on the UI
+            h, w = frame.shape[:2]
+            cx, cy = self.roi_center if self.roi_center else (w // 2, h // 2)
+            r = 50
+            cv2.rectangle(frame, (cx - r, cy - r), (cx + r, cy + r), (0, 255, 0), 2)
+            cv2.circle(frame, (cx, cy), 5, (0, 255, 0), -1)
+
             patch = "#{:02x}{:02x}{:02x}".format(rgb[0], rgb[1], rgb[2])
             self.color_patch.delete("all")
             self.color_patch.create_rectangle(0, 0, 44, 20, fill=patch, outline="")
@@ -449,13 +458,37 @@ class TitrationApp(tk.Tk):
 
         self.after(33, self._camera_loop)
 
+    def _on_camera_click(self, event):
+        if self.current_frame is None:
+            return
+
+        # Map click from 760x520 label to original frame resolution
+        label_w, label_h = 760, 520
+        h, w = self.current_frame.shape[:2]
+
+        orig_x = int((event.x / label_w) * w)
+        orig_y = int((event.y / label_h) * h)
+
+        # Constrain to frame boundaries
+        orig_x = max(50, min(w - 50, orig_x))
+        orig_y = max(50, min(h - 50, orig_y))
+
+        self.roi_center = (orig_x, orig_y)
+        self._log(f"Metering area moved to ({orig_x}, {orig_y})")
+
     def _estimate_ph(self, frame):
         h, w, _ = frame.shape
         roi_size = 100
-        y1 = max(0, (h // 2) - roi_size // 2)
-        y2 = min(h, (h // 2) + roi_size // 2)
-        x1 = max(0, (w // 2) - roi_size // 2)
-        x2 = min(w, (w // 2) + roi_size // 2)
+        
+        if self.roi_center:
+            cx, cy = self.roi_center
+        else:
+            cx, cy = w // 2, h // 2
+
+        y1 = max(0, cy - roi_size // 2)
+        y2 = min(h, cy + roi_size // 2)
+        x1 = max(0, cx - roi_size // 2)
+        x2 = min(w, cx + roi_size // 2)
 
         roi = frame[y1:y2, x1:x2]
         if roi.size == 0:
